@@ -1,0 +1,6 @@
+2025-10-19 18:14:54 | INFO     | core.logging:setup_logging:37 - Logging initialized - Level: INFO
+2025-10-19 18:14:54 | INFO     | core.logging:setup_logging:38 - Log file: ./logs/app.log
+2025-10-19 18:15:59 | INFO     | core.logging:setup_logging:37 - Logging initialized - Level: INFO
+2025-10-19 18:15:59 | INFO     | core.logging:setup_logging:38 - Log file: ./logs/app.log
+2025-10-19 18:16:00 | INFO     | core.logging:setup_logging:37 - Logging initialized - Level: INFO
+2025-10-19 18:16:00 | INFO     | core.logging:setup_logging:38 - Log file: ./logs/app.log
