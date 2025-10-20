@@ -14,7 +14,7 @@ from app.services.parser import DocumentParser
 from app.services.cleaner import TextCleaner
 from app.services.chunker import DocumentChunker
 from app.services.embeddings import embedding_service
-from app.services.typesense_service import typesense_service
+from app.services.qdrant_service import qdrant_service
 from app.core.config import settings
 from app.core.logging import app_logger as logger
 
@@ -293,19 +293,19 @@ class DocumentService:
             else:
                 chunks_with_embeddings = []
             
-            # Step 6: Index in Typesense
+            # Step 6: Index in Qdrant
             if chunks_with_embeddings:
-                logger.info(f"Indexing {len(chunks_with_embeddings)} chunks in Typesense")
+                logger.info(f"Indexing {len(chunks_with_embeddings)} chunks in Qdrant")
                 await self.update_document_status(document_id, "indexing")
-                
+
                 try:
-                    index_result = typesense_service.index_chunks(
+                    index_result = qdrant_service.index_chunks(
                         chunks_with_embeddings,
                         document_id
                     )
-                    
+
                     logger.info(f"Indexed {index_result['successful']} chunks successfully")
-                    
+
                     # Log indexing success
                     await self.log_processing_step(
                         document_id,
@@ -314,16 +314,16 @@ class DocumentService:
                         f"Indexed {index_result['successful']} chunks",
                         None
                     )
-                    
+
                     # Final status: indexed
                     await self.update_document_status(
                         document_id,
                         "indexed",
                         indexed_at=datetime.utcnow()
                     )
-                    
+
                 except Exception as e:
-                    error_msg = f"Typesense indexing failed: {str(e)}"
+                    error_msg = f"Qdrant indexing failed: {str(e)}"
                     logger.error(error_msg)
                     await self.log_processing_step(document_id, "indexing", "error", error_msg)
                     # Mark as cleaned but not indexed

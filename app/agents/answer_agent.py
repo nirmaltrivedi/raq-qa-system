@@ -19,10 +19,18 @@ class AnswerAgent(BaseAgent):
         self.log_execution("Generating answer", f"query='{query[:50]}...'")
 
         try:
+            # Filter low-quality chunks before processing
+            filtered_results = self._filter_low_quality_chunks(search_results)
+
+            self.log_execution(
+                "Chunk filtering",
+                f"Filtered {len(search_results)} → {len(filtered_results)} chunks"
+            )
+
             # Assemble context
             context_chunks, token_usage = context_manager.assemble_context(
                 query=query,
-                search_results=search_results,
+                search_results=filtered_results,
                 conversation_history=conversation_history
             )
 
@@ -72,20 +80,36 @@ class AnswerAgent(BaseAgent):
             }
 
     def _build_system_prompt(self) -> str:
-
+        """
+        Build an improved system prompt that encourages more helpful answers
+        while maintaining accuracy and grounding in context.
+        """
         return """You are a helpful AI assistant that answers questions based on provided document context.
 
 Instructions:
-1. Answer the question using ONLY the information from the provided context chunks
-2. If the context doesn't contain enough information, clearly state: "I don't have enough information in the provided documents to answer this question."
-3. Include specific references when possible (e.g., "According to the document on page X...")
-4. Be concise but comprehensive in your answers
-5. If asked a follow-up question, consider the conversation history
-6. Maintain a professional and helpful tone
-7. If you find conflicting information in the context, mention both perspectives
-8. Do not make up information or use knowledge outside the provided context
+1. Answer the question using the information from the provided context chunks
+2. If the context contains relevant information, synthesize it into a comprehensive answer
+3. You may make reasonable inferences from the context, but clearly distinguish between:
+   - Direct information from documents: Use "According to [document/source]..."
+   - Your synthesis/inference: Use "Based on this information..." or "This suggests..."
+4. ONLY say "I don't have enough information" if the context is completely unrelated to the question
+5. If you find partial information:
+   - Provide what you can answer
+   - Clearly state what aspects you cannot address
+   - Example: "While the documents explain X, they don't cover Y"
+6. Include specific references when possible (e.g., "According to [filename] on page X...")
+7. If asked a follow-up question, use conversation history to maintain context
+8. If you find conflicting information, mention both perspectives and note the discrepancy
+9. Be concise but comprehensive - prioritize clarity over brevity
+10. Maintain a professional and helpful tone
 
-Format your response clearly and professionally."""
+Context Quality Guidelines:
+- High confidence: Multiple relevant chunks with consistent information → Provide detailed answer
+- Medium confidence: Some relevant information but incomplete → Answer what you can, note gaps
+- Low confidence: Tangentially related information → Provide context-based insights with caveats
+- No confidence: Completely unrelated context → State lack of information
+
+Format your response clearly with proper structure (paragraphs, bullet points if helpful)."""
 
     def _extract_sources(self, search_results: List[Dict]) -> List[Dict]:
 
@@ -110,21 +134,70 @@ Format your response clearly and professionally."""
 
         return sources
 
+    def _filter_low_quality_chunks(
+        self,
+        search_results: List[Dict],
+        min_score: float = 0.3
+    ) -> List[Dict]:
+        """
+        Filter out chunks with very low relevance scores.
+
+        Args:
+            search_results: List of search results with scores
+            min_score: Minimum score threshold (0-1 scale)
+
+        Returns:
+            Filtered list of search results
+        """
+        if not search_results:
+            return []
+
+        # Try to get score from different possible fields
+        filtered = []
+        for result in search_results:
+            score = result.get("score", 0)
+
+            # If score is not in 0-1 range, try to normalize
+            if score > 1:
+                score = min(score / 1000000, 1.0)
+
+            # Keep chunks above threshold
+            if score >= min_score:
+                filtered.append(result)
+
+        # If filtering removed everything, keep at least top 3
+        if not filtered and search_results:
+            return search_results[:3]
+
+        return filtered
+
     def _calculate_confidence(self, search_results: List[Dict]) -> float:
-        
+        """
+        Calculate confidence score based on search results quality.
+
+        Uses the score field from Qdrant hybrid search (0-1 range).
+        """
         if not search_results:
             return 0.0
 
-        top_score = search_results[0].get("text_match_score", 0) / 1000000
+        # Get top score (Qdrant returns scores in 0-1 range for hybrid search)
+        top_score = search_results[0].get("score", 0)
 
-        confidence = min(top_score / 1000, 1.0)
+        # Normalize if needed (for backward compatibility)
+        if top_score > 1:
+            top_score = min(top_score / 1000000, 1.0)
 
+        # Base confidence on top score
+        confidence = min(top_score, 1.0)
+
+        # Boost confidence if multiple high-quality results
         if len(search_results) >= 3:
-            avg_score = sum(
-                r.get("text_match_score", 0) for r in search_results[:3]
-            ) / 3 / 1000000
+            avg_score = sum(r.get("score", 0) for r in search_results[:3]) / 3
 
-            if avg_score > 500:  # High average score
+            if avg_score > 1:  # Normalize
+                avg_score = min(avg_score / 1000000, 1.0)
+
+            if avg_score > 0.5:  # High average score
                 confidence = min(confidence + 0.1, 1.0)
 
         return round(confidence, 2)

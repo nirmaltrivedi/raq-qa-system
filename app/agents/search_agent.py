@@ -1,13 +1,18 @@
 from typing import Dict, Any, List
 from app.agents.base_agent import BaseAgent
-from app.services.typesense_service import typesense_service
-from app.services.embeddings import embedding_service
-from app.utils.similarity import cosine_similarity, hybrid_score
+from app.services.qdrant_service import qdrant_service
+from app.services.reranker import reranker_service
 from app.core.config import settings
 import time
 
 
 class SearchAgent(BaseAgent):
+    """
+    Search agent using Qdrant for hybrid search (BM25 + Vector).
+
+    Qdrant handles server-side fusion of keyword and semantic search,
+    eliminating the need for client-side reranking.
+    """
 
     def __init__(self):
         super().__init__(name="SearchAgent")
@@ -19,21 +24,42 @@ class SearchAgent(BaseAgent):
         filter_by: str = None,
         **kwargs
     ) -> Dict[str, Any]:
+        """
+        Execute hybrid search using Qdrant.
+
+        Flow:
+        1. Call Qdrant hybrid search (BM25 + vector with RRF fusion)
+        2. Results are already ranked by Qdrant server-side
+        3. Format and return results
+
+        Args:
+            query: Search query
+            top_k: Number of results to return
+            filter_by: Filter expression (e.g., "document_id:=abc123")
+
+        Returns:
+            Search results with scores
+        """
         self.log_execution("Executing hybrid search", f"query='{query[:50]}...'")
 
         top_k = top_k or settings.TOP_K_SEARCH_RESULTS
 
         try:
-            keyword_limit = max(top_k * 4, 15)  # At least 15 results for reranking
+            search_start = time.time()
 
-            self.log_execution("Keyword search", f"fetching {keyword_limit} results")
+            # Fetch more results for reranking (2x top_k)
+            # Reranker will select the best top_k from these
+            fetch_limit = top_k * 2
 
-            search_results = typesense_service.search(
+            # Execute hybrid search (Qdrant handles BM25 + vector fusion server-side)
+            search_results = qdrant_service.search(
                 query=query,
-                limit=keyword_limit,
+                limit=fetch_limit,
                 filter_by=filter_by,
-                hybrid_search=False  # Fast keyword-only search
+                hybrid_search=True  # Enable hybrid search (BM25 + vector)
             )
+
+            search_time_ms = (time.time() - search_start) * 1000
 
             # Extract hits
             hits = search_results.get("hits", [])
@@ -47,30 +73,54 @@ class SearchAgent(BaseAgent):
                     "message": "No relevant documents found"
                 }
 
-            # Step 2: Client-side semantic reranking (adds semantic understanding)
-            self.log_execution("Semantic reranking", f"reranking {len(hits)} results")
+            # Format results
+            formatted_results = []
+            for hit in hits:
+                payload = hit.get("payload", {})
+                formatted_results.append({
+                    "document": {
+                        "id": hit.get("id"),
+                        "text": payload.get("text"),
+                        "document_id": payload.get("document_id"),
+                        "filename": payload.get("filename"),
+                        "file_type": payload.get("file_type"),
+                        "chunk_index": payload.get("chunk_index"),
+                        "char_count": payload.get("char_count"),
+                        "word_count": payload.get("word_count"),
+                    },
+                    "score": hit.get("score", 0),  # Combined hybrid score from Qdrant
+                    "hybrid_search_info": {
+                        "search_type": "qdrant_hybrid",
+                        "fusion_method": "RRF",
+                        "vector_weight": settings.HYBRID_SEARCH_WEIGHT_VECTOR,
+                        "keyword_weight": settings.HYBRID_SEARCH_WEIGHT_KEYWORD
+                    }
+                })
+
+            # Apply cross-encoder reranking for better accuracy
+            self.log_execution("Cross-encoder reranking", f"reranking {len(formatted_results)} results")
             rerank_start = time.time()
 
-            reranked_hits = self._semantic_rerank(query, hits, top_k)
+            reranked_results = reranker_service.rerank(
+                query=query,
+                results=formatted_results,
+                top_k=top_k
+            )
 
             rerank_time_ms = (time.time() - rerank_start) * 1000
-            self.log_execution("Reranking complete", f"took {rerank_time_ms:.0f}ms")
+            total_time_ms = search_time_ms + rerank_time_ms
 
-            # Step 3: Format results
-            formatted_results = []
-            for hit in reranked_hits:
-                doc = hit.get("document", {})
-                formatted_results.append({
-                    "document": doc,
-                    "text_match_score": hit.get("text_match", 0),
-                    "semantic_score": hit.get("semantic_score", 0),
-                    "hybrid_score": hit.get("hybrid_score", 0),
-                    "hybrid_search_info": hit.get("hybrid_search_info", {})
-                })
+            self.log_execution(
+                "Reranking complete",
+                f"took {rerank_time_ms:.0f}ms, top score: {reranked_results[0].get('rerank_score', 0):.3f}"
+            )
+
+            # Use reranked results
+            formatted_results = reranked_results
 
             self.log_execution(
                 "Search completed",
-                f"Found {len(formatted_results)} results"
+                f"Found {len(formatted_results)} results in {total_time_ms:.0f}ms (search: {search_time_ms:.0f}ms + rerank: {rerank_time_ms:.0f}ms)"
             )
 
             return {
@@ -78,7 +128,8 @@ class SearchAgent(BaseAgent):
                 "results": formatted_results,
                 "count": len(formatted_results),
                 "query": query,
-                "search_time_ms": search_results.get("search_time_ms", 0)
+                "search_time_ms": total_time_ms,
+                "rerank_time_ms": rerank_time_ms
             }
 
         except Exception as e:
@@ -91,71 +142,13 @@ class SearchAgent(BaseAgent):
             }
 
     def expand_query(self, query: str) -> List[str]:
+        """
+        Query expansion (currently disabled, can be implemented later).
+
+        Potential expansions:
+        - Synonyms
+        - Stemming variations
+        - Entity extraction
+        """
         queries = [query]
-
         return queries
-
-    def _semantic_rerank(
-        self,
-        query: str,
-        hits: List[Dict],
-        top_k: int
-    ) -> List[Dict]:
-        try:
-            # Generate embedding for query
-            query_embedding = embedding_service.encode_single(query)
-
-            # Compute semantic scores for each result
-            for hit in hits:
-                doc = hit.get("document", {})
-                doc_embedding = doc.get("embedding", [])
-
-                if doc_embedding and len(doc_embedding) > 0:
-                    # Compute cosine similarity
-                    semantic_sim = cosine_similarity(query_embedding, doc_embedding)
-
-                    # Normalize to 0-1 range (cosine is -1 to 1)
-                    semantic_score = (semantic_sim + 1) / 2
-
-                    # Get keyword score (normalize text_match from Typesense)
-                    text_match_score = hit.get("text_match", 0)
-                    # Typesense text_match is very large, normalize it
-                    keyword_score = min(text_match_score / 1e12, 1.0) if text_match_score > 0 else 0.0
-
-                    # Compute hybrid score (70% semantic, 30% keyword)
-                    combined_score = hybrid_score(
-                        keyword_score=keyword_score,
-                        semantic_score=semantic_score,
-                        keyword_weight=settings.HYBRID_SEARCH_WEIGHT_KEYWORD,
-                        semantic_weight=settings.HYBRID_SEARCH_WEIGHT_VECTOR
-                    )
-
-                    # Add scores to hit
-                    hit["semantic_score"] = semantic_score
-                    hit["hybrid_score"] = combined_score
-                else:
-                    # No embedding available, use keyword score only
-                    hit["semantic_score"] = 0.0
-                    hit["hybrid_score"] = hit.get("text_match", 0) / 1e12
-
-            # Sort by hybrid score (descending)
-            reranked_hits = sorted(
-                hits,
-                key=lambda x: x.get("hybrid_score", 0),
-                reverse=True
-            )
-
-            # Return top-K
-            return reranked_hits[:top_k]
-
-        except Exception as e:
-            self.log_error(f"Semantic reranking failed: {str(e)}")
-            # Fallback to keyword-only ranking
-            return hits[:top_k]
-
-    def rerank_results(
-        self,
-        results: List[Dict],
-        query: str
-    ) -> List[Dict]:
-        return results

@@ -18,8 +18,8 @@ class Settings(BaseSettings):
     RELOAD: bool = True
     
     # File Upload
-    MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10MB
-    MIN_UPLOAD_SIZE: int = 1024  # 1KB
+    MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  
+    MIN_UPLOAD_SIZE: int = 1024  
     ALLOWED_EXTENSIONS: str = ".pdf,.docx,.doc,.txt,.md"
     UPLOAD_DIR: str = "./uploads"
     
@@ -35,19 +35,16 @@ class Settings(BaseSettings):
     LOG_FILE: str = "./logs/app.log"
     
     # Document Processing
-    CHUNK_SIZE: int = 500  # tokens
-    CHUNK_OVERLAP: int = 50  # tokens
+    CHUNK_SIZE: int = 500  
+    CHUNK_OVERLAP: int = 50  
 
-    # Typesense Configuration
-    TYPESENSE_HOST: str = "localhost"
-    TYPESENSE_PORT: int = 8108
-    TYPESENSE_PROTOCOL: str = "http"
-    TYPESENSE_API_KEY: str = ""
-    TYPESENSE_COLLECTION_NAME: str = "smart_qa_document_rag"
+    QDRANT_PATH: str = "./qdrant_storage"
+    QDRANT_COLLECTION_NAME: str = "smart_qa_documents"
+    QDRANT_DISTANCE_METRIC: str = "Cosine"
+    QDRANT_USE_SPARSE_VECTORS: bool = True  
 
-    # Embedding Configuration
-    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-    EMBEDDING_DIMENSION: int = 384
+    EMBEDDING_MODEL: str = "BAAI/bge-base-en-v1.5"
+    EMBEDDING_DIMENSION: int = 768
     USE_GPU: bool = False
 
     # Groq LLM Configuration
@@ -94,21 +91,14 @@ class Settings(BaseSettings):
         Path(self.LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
 
     @property
-    def typesense_config(self) -> dict:
-        """Get Typesense connection configuration."""
+    def qdrant_config(self) -> dict:
+        """Get Qdrant connection configuration."""
         return {
-            "nodes": [{
-                "host": self.TYPESENSE_HOST,
-                "port": str(self.TYPESENSE_PORT),
-                "protocol": self.TYPESENSE_PROTOCOL
-            }],
-            "api_key": self.TYPESENSE_API_KEY,
-            "connection_timeout_seconds": 60  # Increased to support hybrid search with embeddings
+            "path": self.QDRANT_PATH,  
+            "force_disable_check_same_thread": True 
         }
 
 
-# Global settings instance
 settings = Settings()
 
-# Ensure directories exist on import
 settings.ensure_directories()

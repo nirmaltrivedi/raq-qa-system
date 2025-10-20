@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from pydantic import BaseModel
 
-from app.services.typesense_service import typesense_service
+from app.services.qdrant_service import qdrant_service
 from app.core.logging import app_logger as logger
 
 
@@ -26,28 +26,28 @@ class SearchResponse(BaseModel):
 @router.post("/", response_model=SearchResponse)
 async def search_documents(search: SearchQuery):
     logger.info(f"Search query: '{search.query}'")
-    
+
     try:
         # Build filter
         filter_by = None
         if search.document_id:
             filter_by = f"document_id:={search.document_id}"
-        
-        # Execute search
-        results = typesense_service.search(
+
+        # Execute search using Qdrant
+        results = qdrant_service.search(
             query=search.query,
             limit=search.limit,
             filter_by=filter_by,
             hybrid_search=search.hybrid
         )
-        
+
         return SearchResponse(
             query=search.query,
             found=results.get("found", 0),
             results=results.get("hits", []),
             search_time_ms=results.get("search_time_ms", 0)
         )
-        
+
     except Exception as e:
         logger.error(f"Search failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
@@ -71,8 +71,9 @@ async def search_documents_get(
 
 @router.get("/stats")
 async def get_search_stats():
+    """Get Qdrant collection statistics."""
     try:
-        stats = typesense_service.get_collection_stats()
+        stats = qdrant_service.get_collection_stats()
         return {
             "status": "success",
             "stats": stats

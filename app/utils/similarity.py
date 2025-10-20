@@ -27,18 +27,3 @@ def cosine_similarity(vec1: Union[List[float], np.ndarray], vec2: Union[List[flo
     similarity = np.clip(similarity, -1.0, 1.0)
 
     return float(similarity)
-
-
-def hybrid_score(
-    keyword_score: float,
-    semantic_score: float,
-    keyword_weight: float = 0.3,
-    semantic_weight: float = 0.7
-) -> float:
-    
-    total_weight = keyword_weight + semantic_weight
-    if total_weight > 0:
-        keyword_weight /= total_weight
-        semantic_weight /= total_weight
-
-    return (keyword_score * keyword_weight) + (semantic_score * semantic_weight)
